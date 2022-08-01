@@ -5,6 +5,8 @@ enum ErrType {
 	E_SUCC,
 	E_ARG,
 	E_ALLOC,
+	E_IO,
+	E_SIGH,
 	E_UNKNOWN
 };
 
