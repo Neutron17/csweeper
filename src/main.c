@@ -43,7 +43,8 @@ enum CmdType {
 	C_RIGHT,
 	C_SELECT,
 
-	C_SAVE
+	C_SAVE,
+	C_LOAD
 };
 
 Board createBoard(uint8_t w, uint8_t h);
@@ -65,20 +66,23 @@ void clearBoard(Board *board);
 enum CmdType parseInput(const char *input);
 /* returns: true: fail, false: success */
 bool handleInput(enum CmdType type, Board *board);
-void saveBoard(Board *board, const char *fname);
+// saves board to file
+void saveBoard(const Board *board, const char *fname);
+// loads board from file
+void loadBoard(Board *board, const char *fname);
 
 void signalHandler(int signal);
+// static variable magic for signalHandler
+Board *sigBoard(Board *board);
 
 const char *cmdHelp =
 	"Minesweeper - command help\n"
 	"\tH,?: help\n"
 	"\tq: quit\n";
 bool isDebug = false;
-// global board, should only be used/changed in main and signalHandler
-Board gboard;
 
 /* TODO
- * load
+ * open all closed nulls next to null
 */
 
 int main(int argc, char *argv[]) {
@@ -89,23 +93,24 @@ int main(int argc, char *argv[]) {
 	struct Args args = parseArgs(argc, argv);
 	isDebug = args.isDebug;
 
-	gboard = createBoard(args.w, args.h);
+	Board board = createBoard(args.w, args.h);
+	sigBoard(&board);
 
-	spawnMines(&gboard, args.m);
+	spawnMines(&board, args.m);
 
-	for(int y = 0; y < gboard.h; y++) {
-		for(int x = 0; x < gboard.w; x++) {
-			if(getCell(gboard, x, y).isMine)
+	for(int y = 0; y < board.h; y++) {
+		for(int x = 0; x < board.w; x++) {
+			if(getCell(board, x, y).isMine)
 				continue;
-			int neighs = countNeighbourMines(gboard, x, y);
-			getCell_ref(&gboard, x, y)->value = neighs;
+			int neighs = countNeighbourMines(board, x, y);
+			getCell_ref(&board, x, y)->value = neighs;
 		}
 	}
 	bool running = true;
 	char inpBuff[16];
 
 	while(running) {
-		printBoard(gboard);
+		printBoard(board);
 inp:;
     		printf("> ");
 		fflush(stdout);
@@ -119,7 +124,7 @@ inp:;
 				running = false;
 				break;
 			case C_SELECT:;
-				Cell *curc = &gboard.cells[gboard.cursorPtr];
+				Cell *curc = &board.cells[board.cursorPtr];
 				if(curc->isOpen) {
 					// TODO
 				} else { // not open
@@ -128,14 +133,14 @@ inp:;
 						printf("GAME OVER\n");
 						running = false;
 					} else if(curc->value == 0) {
-					puts("Here");
-						printf("%d %d", gboard.cursorPtr%gboard.h, gboard.cursorPtr/gboard.h);
-						setNeighbourZeros(&gboard, gboard.cursorPtr%gboard.h, gboard.cursorPtr/gboard.h);
+						setNeighbourZeros(&board,
+								board.cursorPtr % board.h,
+								board.cursorPtr / board.h);
 					}
 				}
 				break;
 			default:
-				if(handleInput(type, &gboard))
+				if(handleInput(type, &board))
 					goto inp;
 				break;
 		}
@@ -143,7 +148,7 @@ inp:;
 cleanUp:;
 	if(isDebug)
 		puts("DEBUG: Cleaning up");
-	destroyBoard(&gboard);
+	destroyBoard(&board);
 	if(isDebug)
 		puts("DEBUG: Exiting");
 	return E_SUCC;
@@ -181,6 +186,9 @@ bool handleInput(enum CmdType type, Board *board) {
 
 		case C_SAVE:
 			saveBoard(board, "save");
+			break;
+		case C_LOAD:
+			loadBoard(board, "save");
 			break;
 
 		case C_SELECT:
@@ -224,7 +232,6 @@ enum CmdType parseInput(const char *input) {
 			case 'k':
 			case 'd':
 				return C_RIGHT;
-
 			/*case EOF:
 				return C_ERR;*/
 			default:
@@ -237,8 +244,10 @@ enum CmdType parseInput(const char *input) {
 			return C_QUIT;
 		} else if (strncasecmp(buff, "exit", 4) == 0) {
 			return C_QUIT;
-		}  else if (strncasecmp(buff, "save", 4) == 0) {
+		} else if (strncasecmp(buff, "save", 4) == 0) {
 			return C_SAVE;
+		} else if (strncasecmp(buff, "load", 4) == 0) {
+			return C_LOAD;
 		} else {
 			return C_UNKNOWN;
 		}
@@ -383,8 +392,7 @@ void printBoard(Board board) {
 		printf("|");
 		for(int x = 0; x < board.w; x++) {
 			if((y*board.w + x) == board.cursorPtr) {
-				printf("P");
-				continue;
+				printf("\033[1;41m\033[5m");
 			}
 			Cell c = getCell(board, x, y);
 			if(!c.isOpen) {
@@ -396,7 +404,7 @@ void printBoard(Board board) {
 			} else {
 				printf("%d", c.value);
 			}
-			//printf("%c", getCell(board, x, y).value);
+			printf("\033[m\033[39;49m");
 		}
 		puts("|");
 	}
@@ -405,27 +413,58 @@ void printBoard(Board board) {
 	puts("");
 }
 
-void saveBoard(Board *board, const char *fname) {
-	FILE *file = fopen(fname, "w");
+void saveBoard(const Board *board, const char *fname) {
+	FILE *file = fopen(fname, "wb");
 	if(!file) {
 		fprintf(stderr, "ERROR: Couldn't open file for board, '%s', '%s'\n", fname, strerror(errno));
-
 		return;
 	}
-	fwrite(board, 1, sizeof(Board), file);
+	fwrite(&board->cursorPtr, 1, sizeof(uint8_t), file);
+	fwrite(&board->w, 1, sizeof(uint8_t), file);
+	fwrite(&board->h, 1, sizeof(uint8_t), file);
+	for(int y = 0; y < board->h; y++) {
+		for(int x = 0; x < board->w; x++)
+			fwrite(getCell_ref(board, x, y), 1, sizeof(Cell), file);
+	}
+	//fwrite(board, 1, sizeof(Board), file);
 	fflush(file);
 	fclose(file);
 }
+
+void loadBoard(Board *board, const char *fname) {
+	FILE *file = fopen(fname, "rb");
+	if(!file) {
+		fprintf(stderr, "ERROR: Couldn't open file for board, '%s', '%s'\n", fname, strerror(errno));
+		return;
+	}
+	fread(&board->cursorPtr, 1, sizeof(uint8_t), file);
+	fread(&board->w, 1, sizeof(uint8_t), file);
+	fread(&board->h, 1, sizeof(uint8_t), file);
+	for(int y = 0; y < board->h; y++) {
+		for(int x = 0; x < board->w; x++)
+			fread(getCell_ref(board, x, y), 1, sizeof(Cell), file);
+	}
+	fflush(file);
+	fclose(file);
+}
+
+Board *sigBoard(Board *board) {
+	static Board *b;
+	if(!board)
+		b = board;
+	return b;
+}
+
 void signalHandler(int signal) {
 	if(signal == SIGINT) {
-		destroyBoard(&gboard);
+		destroyBoard(sigBoard(NULL));
 	}
 	static int depth = 0;
 	if(depth > SIGH_MAXD)
 		exit(E_SIGH);
 	const char *fname = "err.log";
 	fprintf(stderr, "FATAL ERROR, Dumping contents of board to %s\n", fname);
-	saveBoard(&gboard, fname);
+	saveBoard(sigBoard(NULL), fname);
 	if(isDebug)
 		puts("DEBUG: Exiting");
 }
